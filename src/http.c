@@ -2,7 +2,18 @@
 #include <openssl/ssl.h>
 #include <string.h>
 #include <zlib.h>
-
+#include <stdlib.h>
+#include <errno.h> 
+#include <netdb.h> 
+#include <sys/types.h> 
+#include <netinet/in.h> 
+#include <sys/socket.h> 
+#include <unistd.h>
+#include <stdio.h>
+#include <malloc.h>
+#include <resolv.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 #include "html.h"
 #include "server.h"
 #include "utils.h"
@@ -16,8 +27,187 @@ enum { AUTH_OK, AUTH_FAIL, AUTH_ERROR };
 static char *html_cache = NULL;
 static size_t html_cache_len = 0;
 
+static int auth_error(struct lws *wsi, struct pss_http *pss, int basic) {
+  char *body = strdup("401 Unauthorized\n");
+  size_t n = strlen(body);
+
+  unsigned char buffer[1024 + LWS_PRE], *p, *end;
+  p = buffer + LWS_PRE;
+  end = p + sizeof(buffer) - LWS_PRE;
+
+  if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
+      (basic==1 && lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
+                                   (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end)==0) ||
+      lws_add_http_header_content_length(wsi, n, &p, end) ||
+      lws_finalize_http_header(wsi, &p, end) ||
+      lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
+    return AUTH_ERROR;
+
+  pss->buffer = pss->ptr = body;
+  pss->len = n;
+  lws_callback_on_writable(wsi);
+
+  return AUTH_FAIL;
+}
+
+static bool url_auth_validate(struct lws *wsi) {
+  int sockfd, numbytes;  
+  char buf[2048];
+  struct hostent *he;
+  struct sockaddr_in their_addr; /* connector's address information */
+
+  if ((he=gethostbyname(server->auth_url.host)) == NULL) {  /* get the host info */
+    herror("gethostbyname");
+    return false;
+  }
+
+  if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+    perror("socket");
+    return false;
+  }
+
+  their_addr.sin_family = AF_INET;      /* host byte order */
+  their_addr.sin_port = htons(server->auth_url.port);    /* short, network byte order */
+  their_addr.sin_addr = *((struct in_addr *)he->h_addr);
+  bzero(&(their_addr.sin_zero), 8);     /* zero the rest of the struct */
+
+  if (connect(sockfd, (struct sockaddr *)&their_addr, sizeof(struct sockaddr)) == -1) {
+    perror("connect");
+    return false;
+  }
+
+  char req[2048];
+  strcpy(&req[0], "GET /");
+  int pos = 5;
+  if(server->auth_url.path!=NULL) {
+    strcpy(&req[pos], server->auth_url.path);
+    pos += strlen(server->auth_url.path);
+  }
+  if(server->auth_url.query!=NULL) {
+    strcpy(&req[pos], "?");
+    pos += 1;
+    strcpy(&req[pos], server->auth_url.query);
+    pos += strlen(server->auth_url.query);
+  }
+  char lwq[200];
+  int lwc = 0;
+  bool lws = false;
+  while(lws_hdr_copy_fragment(wsi, lwq, 200, WSI_TOKEN_HTTP_URI_ARGS, lwc++)!=-1) {
+    if(!lws) {
+      lws = true;
+      if(server->auth_url.query==NULL) {
+        strcpy(&req[pos], "?");
+        pos += 1;
+      } else {
+        strcpy(&req[pos], "&");
+        pos += 1;
+      }
+    }
+
+    strcpy(&req[pos], lwq);
+    pos += strlen(lwq);
+    strcpy(&req[pos], "&");
+    pos += 1;
+  }
+
+  strcpy(&req[pos], " HTTP/1.1\r\nUser-Agent: program\r\nOrigin: ");
+  pos += 40;
+  strcpy(&req[pos], server->auth_url.scheme);
+  pos += strlen(server->auth_url.scheme);
+  strcpy(&req[pos], "://");
+  pos += 3;
+  strcpy(&req[pos], server->auth_url.host);
+  pos += strlen(server->auth_url.host);
+  if((strcmp(server->auth_url.scheme, "http")==0 && server->auth_url.port != 80) || 
+      (strcmp(server->auth_url.scheme, "https")==0 && server->auth_url.port != 443)) {
+    char port_s[5];
+    snprintf(port_s, 5, "%d", server->auth_url.port);
+    strcpy(&req[pos], port_s);
+    pos += strlen(port_s);
+  }
+  strcpy(&req[pos], "\r\n");
+  pos += 2;
+  strcpy(&req[pos], "Host: ");
+  pos += 6;
+  strcpy(&req[pos], server->auth_url.host);
+  pos += strlen(server->auth_url.host);
+  strcpy(&req[pos], "\r\n\r\n");
+  pos += 4;
+
+  printf("%s", req);
+
+  if(strcmp(server->auth_url.scheme, "https")==0) {
+    SSL_CTX *ctx;
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();  /* Load cryptos, et.al. */
+    SSL_load_error_strings();   /* Bring in and register error messages */
+    const SSL_METHOD *method = TLS_client_method();  /* Create new client-method instance */
+    ctx = SSL_CTX_new(method);   /* Create new context */
+    if ( ctx == NULL )
+    {
+        ERR_print_errors_fp(stderr);
+        close(sockfd);
+        return false;
+    }
+
+    SSL *ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, sockfd);
+    if ( SSL_connect(ssl) == -1 ) {
+      ERR_print_errors_fp(stderr);
+      close(sockfd);
+      SSL_CTX_free(ctx);
+      return false;
+    }
+
+    if(SSL_write(ssl, req, pos)<=0) {
+      perror("SSL_write");
+      SSL_free(ssl);
+      close(sockfd);
+      SSL_CTX_free(ctx);
+      return false;
+    }
+    if ((numbytes = SSL_read(ssl, buf, 2048))<=0) {
+      perror("SSL_read");
+      SSL_free(ssl);
+      close(sockfd);
+      SSL_CTX_free(ctx);
+      return false;
+    }
+
+    SSL_free(ssl);
+    close(sockfd);
+    SSL_CTX_free(ctx);
+  } else {
+    if (send(sockfd, req, pos, 0) == -1){
+      perror("send");
+      close(sockfd);
+      return false;
+    }
+
+    if ((numbytes=recv(sockfd, buf, 2048, 0)) == -1) {
+      perror("recv");
+      close(sockfd);
+      return false;
+    }
+    close(sockfd);
+  }
+  
+  if(strstr(buf, "HTTP/1.1 200")!=NULL) {
+    return true;
+  }
+  return false;
+}
+
 static int check_auth(struct lws *wsi, struct pss_http *pss) {
-  if (server->credential == NULL) return AUTH_OK;
+  if(server->auth_url_str!=NULL && strlen(server->auth_url_str)>0) {
+    if(url_auth_validate(wsi)) {
+      return AUTH_OK;
+    }
+    return auth_error(wsi, pss, 0);
+  }
+
+  if (server->credential == NULL && !server->force_auth) return AUTH_OK;
+  else if(server->force_auth && server->credential == NULL) return auth_error(wsi, pss, 0);
 
   int hdr_length = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_AUTHORIZATION);
   char buf[hdr_length + 1];
@@ -37,26 +227,7 @@ static int check_auth(struct lws *wsi, struct pss_http *pss) {
     if (b64_text != NULL && !strcmp(b64_text, server->credential)) return AUTH_OK;
   }
 
-  unsigned char buffer[1024 + LWS_PRE], *p, *end;
-  p = buffer + LWS_PRE;
-  end = p + sizeof(buffer) - LWS_PRE;
-
-  char *body = strdup("401 Unauthorized\n");
-  size_t n = strlen(body);
-
-  if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
-      lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
-                                   (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end) ||
-      lws_add_http_header_content_length(wsi, n, &p, end) ||
-      lws_finalize_http_header(wsi, &p, end) ||
-      lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
-    return AUTH_ERROR;
-
-  pss->buffer = pss->ptr = body;
-  pss->len = n;
-  lws_callback_on_writable(wsi);
-
-  return AUTH_FAIL;
+  return auth_error(wsi, pss, 1);
 }
 
 static bool accept_gzip(struct lws *wsi) {
