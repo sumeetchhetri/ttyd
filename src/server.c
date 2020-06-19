@@ -68,8 +68,10 @@ static const struct option options[] = {
     {"debug", required_argument, NULL, 'd'},
     {"version", no_argument, NULL, 'v'},
     {"help", no_argument, NULL, 'h'},
+    {"auth-url", required_argument, NULL, 'v'},
+    {"force-auth", no_argument, NULL, 'h'},
     {NULL, 0, 0, 0}};
-static const char *opt_string = "p:i:c:u:g:s:I:b:6aSC:K:A:Rt:T:Om:oBd:vh";
+static const char *opt_string = "p:i:c:u:g:s:I:b:6aSC:K:A:Rt:T:Om:oBd:vh:z:x";
 
 static void print_help() {
   // clang-format off
@@ -105,6 +107,8 @@ static void print_help() {
           "    -d, --debug             Set log level (default: 7)\n"
           "    -v, --version           Print the version and exit\n"
           "    -h, --help              Print this text and exit\n\n"
+          "    -z, --auth-url          URL used for authentication\n"
+          "    -x, --force-auth        Force authentication\n"
           "Visit https://github.com/tsl0922/ttyd to get more information and report bugs.\n",
           TTYD_VERSION
   );
@@ -307,6 +311,23 @@ int main(int argc, char **argv) {
       case 'o':
         server->once = true;
         break;
+      case 'z':
+        server->auth_url_str = strdup(optarg);
+        if (-1 == yuarel_parse(&server->auth_url, server->auth_url_str)) {
+          fprintf(stderr, "Could not parse url!\n");
+          return 1;
+        }
+        if(server->auth_url.port==0) {
+          if(strcmp(server->auth_url.scheme, "http")==0) {
+            server->auth_url.port = 80;
+          } else if(strcmp(server->auth_url.scheme, "https")==0) {
+            server->auth_url.port = 443;
+          }
+        }
+        break;
+      case 'x':
+        server->force_auth = true;
+        break;
       case 'B':
         browser = true;
         break;
@@ -502,6 +523,10 @@ int main(int argc, char **argv) {
   if (server->index != NULL) {
     lwsl_notice("  custom index.html: %s\n", server->index);
   }
+  if (server->auth_url_str != NULL) {
+    lwsl_notice("  auth url: %s\n", server->auth_url_str);
+  }
+  if (server->force_auth) lwsl_notice("  force authentication: true\n");
 
 #if LWS_LIBRARY_VERSION_MAJOR >= 3
   void *foreign_loops[1];
