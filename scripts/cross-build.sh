@@ -90,6 +90,15 @@ build_libwebsockets() {
 	popd
 }
 
+build_hiredis_vip() {
+	echo "=== Building hiredis_vip (${TARGET})..."
+	cd ${BUILD_DIR}
+	git clone https://github.com/vipshop/hiredis-vip.git
+	cd ${BUILD_DIR}/hiredis-vip && sed -i 's|PREFIX?=/usr/local|PREFIX?=/opt/stage/x86_64-linux-musl|g' Makefile
+	env CC=${TARGET}-gcc AR=${TARGET}-ar RANLIB=${TARGET}-ranlib C_INCLUDE_PATH=${STAGE_DIR}/include make && make install
+	cd /ttyd
+}
+
 build_ttyd() {
 	echo "=== Building ttyd (${TARGET})..."
 	rm -rf build && mkdir -p build && cd build
@@ -121,6 +130,7 @@ build() {
 	build_libuv
 	build_openssl
 	build_libwebsockets
+	build_hiredis_vip
 	build_ttyd
 }
 

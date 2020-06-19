@@ -68,8 +68,10 @@ static const struct option options[] = {
     {"debug", required_argument, NULL, 'd'},
     {"version", no_argument, NULL, 'v'},
     {"help", no_argument, NULL, 'h'},
+    {"redis-nodes", required_argument, NULL, 'z'},
+    {"force-auth", no_argument, NULL, 'x'},
     {NULL, 0, 0, 0}};
-static const char *opt_string = "p:i:c:u:g:s:I:b:6aSC:K:A:Rt:T:Om:oBd:vh";
+static const char *opt_string = "p:i:c:u:g:s:I:b:6aSC:K:A:Rt:T:Om:oBd:vh:z:x";
 
 static void print_help() {
   // clang-format off
@@ -95,6 +97,8 @@ static void print_help() {
           "    -B, --browser           Open terminal with the default system browser\n"
           "    -I, --index             Custom index.html path\n"
           "    -b, --base-path         Expected base path for requests coming from a reverse proxy (eg: /mounted/here)\n"
+          "    -z, --redis-nodes       Redis nodes used for authentication\n"
+          "    -x, --force-auth        Force authentication\n"
 #ifdef LWS_WITH_IPV6
           "    -6, --ipv6              Enable IPv6 support\n"
 #endif
@@ -333,6 +337,12 @@ int main(int argc, char **argv) {
       case 'u':
         info.uid = atoi(optarg);
         break;
+      case 'z':
+        server->redis_nodes = strdup(optarg);
+        break;
+      case 'x':
+        server->force_auth = true;
+        break;
       case 'g':
         info.gid = atoi(optarg);
         break;
@@ -502,6 +512,10 @@ int main(int argc, char **argv) {
   if (server->index != NULL) {
     lwsl_notice("  custom index.html: %s\n", server->index);
   }
+  if (server->redis_nodes != NULL) {
+    lwsl_notice("  redis nodes: %s\n", server->redis_nodes);
+  }
+  if (server->force_auth) lwsl_notice("  force authentication: true\n");
 
 #if LWS_LIBRARY_VERSION_MAJOR >= 3
   void *foreign_loops[1];

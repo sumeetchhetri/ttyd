@@ -7,6 +7,9 @@
 #include "server.h"
 #include "utils.h"
 
+#include <hiredis-vip/hiredis.h>
+#include <hiredis-vip/hircluster.h>
+
 #if LWS_LIBRARY_VERSION_MAJOR < 2
 #define HTTP_STATUS_FOUND 302
 #endif
@@ -16,8 +19,89 @@ enum { AUTH_OK, AUTH_FAIL, AUTH_ERROR };
 static char *html_cache = NULL;
 static size_t html_cache_len = 0;
 
+static int auth_error(struct lws *wsi, struct pss_http *pss, int basic) {
+  char *body = strdup("401 Unauthorized\n");
+  size_t n = strlen(body);
+
+  unsigned char buffer[1024 + LWS_PRE], *p, *end;
+  p = buffer + LWS_PRE;
+  end = p + sizeof(buffer) - LWS_PRE;
+
+  if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
+      (basic==1 && lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
+                                   (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end)==0) ||
+      lws_add_http_header_content_length(wsi, n, &p, end) ||
+      lws_finalize_http_header(wsi, &p, end) ||
+      lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
+    return AUTH_ERROR;
+
+  pss->buffer = pss->ptr = body;
+  pss->len = n;
+  lws_callback_on_writable(wsi);
+
+  return AUTH_FAIL;
+}
+
 static int check_auth(struct lws *wsi, struct pss_http *pss) {
-  if (server->credential == NULL) return AUTH_OK;
+  if(server->redis_nodes!=NULL && strlen(server->redis_nodes)>0) {
+    int token_hdr_length = lws_hdr_custom_length(wsi, "token:", 6);
+    if(token_hdr_length > 0) {
+      char buf_tok[token_hdr_length + 1];
+      int len = lws_hdr_custom_copy(wsi, buf_tok, sizeof(buf_tok), "token:", 6);
+      if (len > 0) {
+        redisClusterContext *cc = redisClusterContextInit();
+        redisClusterSetOptionAddNodes(cc, server->redis_nodes);
+        redisClusterConnect2(cc);
+        if (cc != NULL && cc->err) {
+            printf("Error: %s\n", cc->errstr);
+            redisClusterFree(cc);
+            return auth_error(wsi, pss, 0);
+        } else {
+          redisReply *reply;
+          reply = redisClusterCommand(cc, "GET %s", buf_tok);
+          if(reply->type==REDIS_REPLY_STRING && strlen(reply->str)>0) {
+            freeReplyObject(reply);
+            redisClusterFree(cc);
+            return AUTH_OK;
+          }
+          freeReplyObject(reply);
+          redisClusterFree(cc);
+        }
+        return auth_error(wsi, pss, 0);
+      }
+    } else {
+      char name[300], *pn = NULL;
+      name[0] = '\0';
+      if (!lws_get_urlarg_by_name(wsi, "token", name, sizeof(name) - 1))
+        lwsl_debug("get urlarg failed\n");
+      if (strchr(name, '='))
+        pn = strchr(name, '=') + 1;
+      if(pn!=NULL) {
+        redisClusterContext *cc = redisClusterContextInit();
+        redisClusterSetOptionAddNodes(cc, server->redis_nodes);
+        redisClusterConnect2(cc);
+        if (cc != NULL && cc->err) {
+            printf("Error: %s\n", cc->errstr);
+            redisClusterFree(cc);
+            return auth_error(wsi, pss, 0);
+        } else {
+          redisReply *reply;
+          reply = redisClusterCommand(cc, "GET %s", pn);
+          if(reply->type==REDIS_REPLY_STRING && strlen(reply->str)>0) {
+            freeReplyObject(reply);
+            redisClusterFree(cc);
+            return AUTH_OK;
+          }
+          freeReplyObject(reply);
+          redisClusterFree(cc);
+        }
+        return auth_error(wsi, pss, 0);
+      }
+    }
+  }
+
+  if (server->credential == NULL && !server->force_auth) return AUTH_OK;
+  else if(server->force_auth && server->credential == NULL) return auth_error(wsi, pss, 0);
 
   int hdr_length = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_AUTHORIZATION);
   char buf[hdr_length + 1];
@@ -37,26 +121,7 @@ static int check_auth(struct lws *wsi, struct pss_http *pss) {
     if (b64_text != NULL && !strcmp(b64_text, server->credential)) return AUTH_OK;
   }
 
-  unsigned char buffer[1024 + LWS_PRE], *p, *end;
-  p = buffer + LWS_PRE;
-  end = p + sizeof(buffer) - LWS_PRE;
-
-  char *body = strdup("401 Unauthorized\n");
-  size_t n = strlen(body);
-
-  if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
-      lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
-                                   (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end) ||
-      lws_add_http_header_content_length(wsi, n, &p, end) ||
-      lws_finalize_http_header(wsi, &p, end) ||
-      lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
-    return AUTH_ERROR;
-
-  pss->buffer = pss->ptr = body;
-  pss->len = n;
-  lws_callback_on_writable(wsi);
-
-  return AUTH_FAIL;
+  return auth_error(wsi, pss, 1);
 }
 
 static bool accept_gzip(struct lws *wsi) {
