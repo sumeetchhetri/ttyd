@@ -37,6 +37,7 @@ interface Props {
     wsUrl: string;
     tokenUrl: string;
     options: ITerminalOptions;
+    authToken: string;
 }
 
 export class Xterm extends Component<Props> {
@@ -62,26 +63,34 @@ export class Xterm extends Component<Props> {
         this.textDecoder = new TextDecoder();
         this.fitAddon = new FitAddon();
         this.overlayAddon = new OverlayAddon();
-        this.backoff = backoff.exponential({
-            initialDelay: 100,
-            maxDelay: 10000,
-        });
-        this.backoff.failAfter(15);
-        this.backoff.on('ready', () => {
-            this.backoffLock = false;
-            this.refreshToken().then(this.connect);
-        });
-        this.backoff.on('backoff', (_, delay: number) => {
-            console.log(`[ttyd] will attempt to reconnect websocket in ${delay}ms`);
-            this.backoffLock = true;
-        });
-        this.backoff.on('fail', () => {
-            this.backoffLock = true; // break backoff
-        });
+        if(this.props.authToken!==undefined && this.props.authToken!=='') {
+            this.token = this.props.authToken;
+            //this.connect();
+        } else {
+            this.backoff = backoff.exponential({
+                initialDelay: 100,
+                maxDelay: 10000,
+            });
+            this.backoff.failAfter(15);
+            this.backoff.on('ready', () => {
+                this.backoffLock = false;
+                this.refreshToken().then(this.connect);
+            });
+            this.backoff.on('backoff', (_, delay: number) => {
+                console.log(`[ttyd] will attempt to reconnect websocket in ${delay}ms`);
+                this.backoffLock = true;
+            });
+            this.backoff.on('fail', () => {
+                this.backoffLock = true; // break backoff
+            });
+        }
     }
 
     async componentDidMount() {
-        await this.refreshToken();
+        if(this.props.authToken!==undefined && this.props.authToken!=='') {
+        } else {
+            await this.refreshToken();
+        }
         this.openTerminal();
         this.connect();
 
@@ -191,7 +200,10 @@ export class Xterm extends Component<Props> {
     @bind
     private onSocketOpen() {
         console.log('[ttyd] websocket connection opened');
-        this.backoff.reset();
+        if(this.props.authToken!==undefined && this.props.authToken!=='') {
+        } else {
+            this.backoff.reset();
+        }
 
         const { socket, textEncoder, terminal, fitAddon } = this;
         socket.send(textEncoder.encode(JSON.stringify({ AuthToken: this.token })));
@@ -218,7 +230,10 @@ export class Xterm extends Component<Props> {
 
         // 1000: CLOSE_NORMAL
         if (event.code !== 1000 && !backoffLock) {
-            backoff.backoff();
+            if(this.props.authToken!==undefined && this.props.authToken!=='') {
+            } else {
+                backoff.backoff();
+            }
         }
     }
 
@@ -227,7 +242,10 @@ export class Xterm extends Component<Props> {
         console.error('[ttyd] websocket connection error: ', event);
         const { backoff, backoffLock } = this;
         if (!backoffLock) {
-            backoff.backoff();
+            if(this.props.authToken!==undefined && this.props.authToken!=='') {
+            } else {
+                backoff.backoff();
+            }
         }
     }
 

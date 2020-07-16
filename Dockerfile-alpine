@@ -1,12 +1,23 @@
 FROM tsl0922/musl-cross
-RUN git clone --depth=1 https://github.com/sumeetchhetri/ttyd.git /ttyd && \
-    cd /ttyd && ./scripts/cross-build.sh x86_64
+RUN curl -sL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+RUN apt update && apt-get install -y nodejs
+RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | sudo apt-key add -
+RUN echo "deb https://dl.yarnpkg.com/debian/ stable main" | sudo tee /etc/apt/sources.list.d/yarn.list
+RUN apt update && apt install -y yarn
+RUN git clone --depth=1 https://github.com/sumeetchhetri/ttyd.git /ttyd && rm -rf /ttyd/src/* && rm -rf /ttyd/html/*
+COPY src/ /ttyd/src/
+COPY html/ /ttyd/html/
+RUN cd /ttyd && ./scripts/cross-build.sh x86_64
+RUN cd /ttyd/html && yarn install && yarn run build
 
 FROM alpine:3.10
 COPY --from=0 /ttyd/build/ttyd /usr/bin/ttyd
+COPY --from=0 /ttyd/html/dist /dist
 COPY scripts/cpu.sh scripts/mem.sh /
 RUN chmod +x /cpu.sh /mem.sh && mv /cpu.sh /usr/bin/cpu && mv /mem.sh /usr/bin/mem
 RUN apk add --no-cache bash tini atop
+
+ENV TINI_SUBREAPER=1
 
 VOLUME ["/proc_host", "/logs"]
 EXPOSE 7681

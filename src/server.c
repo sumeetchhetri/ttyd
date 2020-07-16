@@ -68,10 +68,12 @@ static const struct option options[] = {
     {"debug", required_argument, NULL, 'd'},
     {"version", no_argument, NULL, 'v'},
     {"help", no_argument, NULL, 'h'},
-    {"auth-url", required_argument, NULL, 'v'},
-    {"force-auth", no_argument, NULL, 'h'},
+    {"force-auth", no_argument, NULL, 'x'},
+    {"auth-url", required_argument, NULL, 'z'},
+    {"basic-auth", no_argument, NULL, 'n'},
+    {"static-path", required_argument, NULL, 'q'},
     {NULL, 0, 0, 0}};
-static const char *opt_string = "p:i:c:u:g:s:I:b:6aSC:K:A:Rt:T:Om:oBd:vh:z:x";
+static const char *opt_string = "p:i:c:u:g:s:I:b:6S:C:K:A:aR:T:t:O:m:oB:d:vhx:z:n:q";
 
 static void print_help() {
   // clang-format off
@@ -109,6 +111,8 @@ static void print_help() {
           "    -h, --help              Print this text and exit\n\n"
           "    -z, --auth-url          URL used for authentication\n"
           "    -x, --force-auth        Force authentication\n"
+          "    -n, --basic-auth        Enable basic authentication\n"
+          "    -q, --static-path       Path to static html files\n"
           "Visit https://github.com/tsl0922/ttyd to get more information and report bugs.\n",
           TTYD_VERSION
   );
@@ -156,6 +160,7 @@ static struct server *server_new(int argc, char **argv, int start) {
   uv_loop_init(ts->loop);
   uv_signal_init(ts->loop, &ts->watcher);
   ts->watcher.data = &ts->procs;
+  ts->enableBasicAuth = false;
 
   return ts;
 }
@@ -311,6 +316,9 @@ int main(int argc, char **argv) {
       case 'o':
         server->once = true;
         break;
+      case 'q':
+        server->static_folder = strdup(optarg);
+        break;
       case 'z':
         server->auth_url_str = strdup(optarg);
         if (-1 == yuarel_parse(&server->auth_url, server->auth_url_str)) {
@@ -327,6 +335,9 @@ int main(int argc, char **argv) {
         break;
       case 'x':
         server->force_auth = true;
+        break;
+      case 'n':
+        server->enableBasicAuth = true;
         break;
       case 'B':
         browser = true;
@@ -527,6 +538,7 @@ int main(int argc, char **argv) {
     lwsl_notice("  auth url: %s\n", server->auth_url_str);
   }
   if (server->force_auth) lwsl_notice("  force authentication: true\n");
+  if (server->enableBasicAuth) lwsl_notice("  enable basic authentication: true\n");
 
 #if LWS_LIBRARY_VERSION_MAJOR >= 3
   void *foreign_loops[1];

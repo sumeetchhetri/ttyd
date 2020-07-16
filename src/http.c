@@ -22,7 +22,7 @@
 #define HTTP_STATUS_FOUND 302
 #endif
 
-enum { AUTH_OK, AUTH_FAIL, AUTH_ERROR };
+enum { AUTH_OK, AUTH_FAIL, AUTH_ERROR, AUTH_LOGIN };
 
 static char *html_cache = NULL;
 static size_t html_cache_len = 0;
@@ -37,7 +37,7 @@ static int auth_error(struct lws *wsi, struct pss_http *pss, int basic) {
 
   if (lws_add_http_header_status(wsi, HTTP_STATUS_UNAUTHORIZED, &p, end) ||
       (basic==1 && lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_WWW_AUTHENTICATE,
-                                   (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end)==0) ||
+                                   (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end)) ||
       lws_add_http_header_content_length(wsi, n, &p, end) ||
       lws_finalize_http_header(wsi, &p, end) ||
       lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
@@ -55,26 +55,6 @@ static bool url_auth_validate(struct lws *wsi) {
   char buf[2048];
   struct hostent *he;
   struct sockaddr_in their_addr; /* connector's address information */
-
-  if ((he=gethostbyname(server->auth_url.host)) == NULL) {  /* get the host info */
-    herror("gethostbyname");
-    return false;
-  }
-
-  if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
-    perror("socket");
-    return false;
-  }
-
-  their_addr.sin_family = AF_INET;      /* host byte order */
-  their_addr.sin_port = htons(server->auth_url.port);    /* short, network byte order */
-  their_addr.sin_addr = *((struct in_addr *)he->h_addr);
-  bzero(&(their_addr.sin_zero), 8);     /* zero the rest of the struct */
-
-  if (connect(sockfd, (struct sockaddr *)&their_addr, sizeof(struct sockaddr)) == -1) {
-    perror("connect");
-    return false;
-  }
 
   char req[2048];
   strcpy(&req[0], "GET /");
@@ -108,6 +88,34 @@ static bool url_auth_validate(struct lws *wsi) {
     pos += strlen(lwq);
     strcpy(&req[pos], "&");
     pos += 1;
+  }
+
+  if(!lws) {
+    return false;
+  }
+
+  if ((he=gethostbyname(server->auth_url.host)) == NULL) {  /* get the host info */
+    herror("gethostbyname");
+    return false;
+  }
+
+  if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
+    perror("socket");
+    return false;
+  }
+
+  their_addr.sin_family = AF_INET;      /* host byte order */
+  their_addr.sin_port = htons(server->auth_url.port);    /* short, network byte order */
+  their_addr.sin_addr = *((struct in_addr *)he->h_addr);
+  bzero(&(their_addr.sin_zero), 8);     /* zero the rest of the struct */
+
+  struct timeval timeout;
+  timeout.tv_sec  = 10;  // after 10 seconds connect() will timeout
+  timeout.tv_usec = 0;
+  setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  if (connect(sockfd, (struct sockaddr *)&their_addr, sizeof(struct sockaddr)) == -1) {
+    perror("connect");
+    return false;
   }
 
   strcpy(&req[pos], " HTTP/1.1\r\nUser-Agent: program\r\nOrigin: ");
@@ -210,31 +218,40 @@ static int check_auth(struct lws *wsi, struct pss_http *pss) {
     if(url_auth_validate(wsi)) {
       return AUTH_OK;
     }
-    return auth_error(wsi, pss, 0);
+    //if(server->static_folder && strstr(pss->path, ".") != NULL) return AUTH_LOGIN;
+    //return auth_error(wsi, pss, server->enableBasicAuth?1:0);
+    //return AUTH_LOGIN;
   }
 
   if (server->credential == NULL && !server->force_auth) return AUTH_OK;
-  else if(server->force_auth && server->credential == NULL) return auth_error(wsi, pss, 1);
+  else if(server->force_auth && server->credential == NULL) return auth_error(wsi, pss, server->enableBasicAuth?1:0);
 
-  int hdr_length = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_AUTHORIZATION);
-  char buf[hdr_length + 1];
-  int len = lws_hdr_copy(wsi, buf, sizeof(buf), WSI_TOKEN_HTTP_AUTHORIZATION);
-  if (len > 0) {
-    // extract base64 text from authorization header
-    char *ptr = &buf[0];
-    char *token, *b64_text = NULL;
-    int i = 1;
-    while ((token = strsep(&ptr, " ")) != NULL) {
-      if (strlen(token) == 0) continue;
-      if (i++ == 2) {
-        b64_text = token;
-        break;
+  if(server->enableBasicAuth) {
+    int hdr_length = lws_hdr_total_length(wsi, WSI_TOKEN_HTTP_AUTHORIZATION);
+    char buf[hdr_length + 1];
+    int len = lws_hdr_copy(wsi, buf, sizeof(buf), WSI_TOKEN_HTTP_AUTHORIZATION);
+    if(len > 0) {
+      // extract base64 text from authorization header
+      char *ptr = &buf[0];
+      char *token, *b64_text = NULL;
+      int i = 1;
+      while ((token = strsep(&ptr, " ")) != NULL) {
+        if (strlen(token) == 0) continue;
+        if (i++ == 2) {
+          b64_text = token;
+          break;
+        }
       }
+      if (b64_text != NULL && !strcmp(b64_text, server->credential)) return AUTH_OK;
     }
-    if (b64_text != NULL && !strcmp(b64_text, server->credential)) return AUTH_OK;
+  } else {
+    int hdr_length = lws_hdr_custom_length(wsi, "logincreds: ", 11);
+    char tbuf[hdr_length + 1];
+    int len = lws_hdr_custom_copy(wsi, tbuf, sizeof(tbuf), "logincreds: ", 11);
+    if(len > 0 && !strcmp(tbuf, server->credential)) return AUTH_OK;
   }
-
-  return auth_error(wsi, pss, 1);
+   
+  return auth_error(wsi, pss, server->enableBasicAuth?1:0);
 }
 
 static bool accept_gzip(struct lws *wsi) {
@@ -290,8 +307,7 @@ static void access_log(struct lws *wsi, const char *path) {
   lwsl_notice("HTTP %s - %s\n", path, rip);
 }
 
-int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in,
-                  size_t len) {
+int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
   struct pss_http *pss = (struct pss_http *)user;
   unsigned char buffer[4096 + LWS_PRE], *p, *end;
   char buf[256];
@@ -301,53 +317,96 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
     case LWS_CALLBACK_HTTP:
       access_log(wsi, (const char *)in);
       snprintf(pss->path, sizeof(pss->path), "%s", (const char *)in);
-      switch (check_auth(wsi, pss)) {
-        case AUTH_OK:
+
+      if(strcmp(pss->path, "/") == 0) {
+        snprintf(pss->path, sizeof(pss->path), "%s", "/index.html");
+      }
+      bool isStaticFile = server->static_folder && strstr(pss->path, ".") != NULL;
+
+      if(!isStaticFile) {
+        switch (check_auth(wsi, pss)) {
+          case AUTH_LOGIN:
+            snprintf(pss->path, sizeof(pss->path), "%s", "/index.html");
+            isStaticFile = true;
+            break;
+          case AUTH_OK:
+            break;
+          case AUTH_FAIL:
+            return 0;
+          case AUTH_ERROR:
+          default:
+            return 1;
+        }
+
+        if(!isStaticFile) {
+          p = buffer + LWS_PRE;
+          end = p + sizeof(buffer) - LWS_PRE;
+
+          if (strcmp(pss->path, endpoints.token) == 0) {
+            const char *credential = server->credential != NULL ? server->credential : "";
+            size_t n = sprintf(buf, "{\"token\": \"%s\"}", credential);
+            if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end) ||
+                lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
+                                            (unsigned char *)"application/json;charset=utf-8", 30, &p,
+                                            end) ||
+                lws_add_http_header_content_length(wsi, (unsigned long)n, &p, end) ||
+                lws_finalize_http_header(wsi, &p, end) ||
+                lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
+              return 1;
+
+            pss->buffer = pss->ptr = strdup(buf);
+            pss->len = n;
+            lws_callback_on_writable(wsi);
+            break;
+          }
+
+          // redirects `/base-path` to `/base-path/`
+          if (strcmp(pss->path, endpoints.parent) == 0) {
+            if (lws_add_http_header_status(wsi, HTTP_STATUS_FOUND, &p, end) ||
+                lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_LOCATION,
+                                            (unsigned char *)endpoints.index,
+                                            (int)strlen(endpoints.index), &p, end) ||
+                lws_add_http_header_content_length(wsi, 0, &p, end) ||
+                lws_finalize_http_header(wsi, &p, end) ||
+                lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
+              return 1;
+            goto try_to_reuse;
+          }
+
+          if (strcmp(pss->path, endpoints.index) != 0) {
+            lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, NULL);
+            goto try_to_reuse;
+          }
+        }
+      }
+
+      if(isStaticFile) {
+        int len = strlen(server->static_folder) + strlen(pss->path) + 1;
+        char stflpth[len];
+        strncpy(stflpth, server->static_folder, strlen(server->static_folder));
+        strncpy(&stflpth[strlen(server->static_folder)], pss->path, strlen(pss->path));
+        stflpth[len-1] = '\0';
+        if(strstr(pss->path, ".html") != NULL) {
+          const char *content_type = "text/html";
+          int n = lws_serve_http_file(wsi, stflpth, content_type, NULL, 0);
+          if (n < 0 || (n > 0 && lws_http_transaction_completed(wsi))) return 1;
           break;
-        case AUTH_FAIL:
-          return 0;
-        case AUTH_ERROR:
-        default:
-          return 1;
-      }
-
-      p = buffer + LWS_PRE;
-      end = p + sizeof(buffer) - LWS_PRE;
-
-      if (strcmp(pss->path, endpoints.token) == 0) {
-        const char *credential = server->credential != NULL ? server->credential : "";
-        size_t n = sprintf(buf, "{\"token\": \"%s\"}", credential);
-        if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end) ||
-            lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
-                                         (unsigned char *)"application/json;charset=utf-8", 30, &p,
-                                         end) ||
-            lws_add_http_header_content_length(wsi, (unsigned long)n, &p, end) ||
-            lws_finalize_http_header(wsi, &p, end) ||
-            lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
-          return 1;
-
-        pss->buffer = pss->ptr = strdup(buf);
-        pss->len = n;
-        lws_callback_on_writable(wsi);
-        break;
-      }
-
-      // redirects `/base-path` to `/base-path/`
-      if (strcmp(pss->path, endpoints.parent) == 0) {
-        if (lws_add_http_header_status(wsi, HTTP_STATUS_FOUND, &p, end) ||
-            lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_LOCATION,
-                                         (unsigned char *)endpoints.index,
-                                         (int)strlen(endpoints.index), &p, end) ||
-            lws_add_http_header_content_length(wsi, 0, &p, end) ||
-            lws_finalize_http_header(wsi, &p, end) ||
-            lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
-          return 1;
-        goto try_to_reuse;
-      }
-
-      if (strcmp(pss->path, endpoints.index) != 0) {
-        lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, NULL);
-        goto try_to_reuse;
+        } else if(strstr(pss->path, ".js") != NULL) {
+          const char *content_type = "application/javascript";
+          int n = lws_serve_http_file(wsi, stflpth, content_type, NULL, 0);
+          if (n < 0 || (n > 0 && lws_http_transaction_completed(wsi))) return 1;
+          break;
+        } else if(strstr(pss->path, ".css") != NULL) {
+          const char *content_type = "text/css";
+          int n = lws_serve_http_file(wsi, stflpth, content_type, NULL, 0);
+          if (n < 0 || (n > 0 && lws_http_transaction_completed(wsi))) return 1;
+          break;
+        } else if(strstr(pss->path, ".png") != NULL) {
+          const char *content_type = "image/png";
+          int n = lws_serve_http_file(wsi, stflpth, content_type, NULL, 0);
+          if (n < 0 || (n > 0 && lws_http_transaction_completed(wsi))) return 1;
+          break;
+        }
       }
 
       const char *content_type = "text/html";
@@ -359,14 +418,14 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
         size_t output_len = index_html_len;
         if (lws_add_http_header_status(wsi, HTTP_STATUS_OK, &p, end) ||
             lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
-                                         (const unsigned char *)content_type, 9, &p, end))
+                                        (const unsigned char *)content_type, 9, &p, end))
           return 1;
 #ifdef LWS_WITH_HTTP_STREAM_COMPRESSION
         if (!uncompress_html(&output, &output_len)) return 1;
 #else
         if (accept_gzip(wsi)) {
           if (lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_ENCODING,
-                                           (unsigned char *)"gzip", 4, &p, end))
+                                          (unsigned char *)"gzip", 4, &p, end))
             return 1;
         } else {
           if (!uncompress_html(&output, &output_len)) return 1;

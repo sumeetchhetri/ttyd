@@ -81,6 +81,7 @@ build_libwebsockets() {
 		    -DCMAKE_EXE_LINKER_FLAGS="-static" \
 		    -DLWS_WITHOUT_TESTAPPS=ON \
 		    -DLWS_WITH_LIBUV=ON \
+			-DLWS_WITH_CUSTOM_HEADERS=ON \
 		    -DLWS_STATIC_PIC=ON \
 		    -DLWS_WITH_SHARED=OFF \
 		    -DLWS_UNIX_SOCK=ON \

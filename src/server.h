@@ -82,9 +82,12 @@ struct server {
   bool once;               // whether accept only one client and exit on disconnection
   char socket_path[255];   // UNIX domain socket path
   char terminal_type[30];  // terminal type to report
+
   char *auth_url_str;      // authentication url
   struct yuarel auth_url;  // authentication url (parsed)
   bool force_auth;         // force authentication
+  bool enableBasicAuth;    // enable basic auth
+  char* static_folder;    // enable basic auth
 
   uv_loop_t *loop;      // the libuv event loop
   uv_signal_t watcher;  // SIGCHLD watcher
