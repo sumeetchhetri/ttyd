@@ -307,6 +307,44 @@ static void access_log(struct lws *wsi, const char *path) {
   lwsl_notice("HTTP %s - %s\n", path, rip);
 }
 
+/**
+ * Remove first occurrence of a word from string
+ */
+void removeFirst(char * str, const char * toRemove)
+{
+    int i, j;
+    int len, removeLen;
+    int found = 0;
+
+    len = strlen(str);
+    removeLen = strlen(toRemove);
+
+    for(i=0; i<len; i++)
+    {
+        found = 1;
+        for(j=0; j<removeLen; j++)
+        {
+            if(str[i+j] != toRemove[j])
+            {
+                found = 0;
+                break;
+            }
+        }
+
+        /* If word has been found then remove it by shifting characters  */
+        if(found == 1)
+        {
+            for(j=i; j<=len-removeLen; j++)
+            {
+                str[j] = str[j + removeLen];
+            }
+
+            // Terminate from loop so only first occurrence is removed
+            break;
+        }
+    }
+}
+
 int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
   struct pss_http *pss = (struct pss_http *)user;
   unsigned char buffer[4096 + LWS_PRE], *p, *end;
@@ -318,7 +356,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       access_log(wsi, (const char *)in);
       snprintf(pss->path, sizeof(pss->path), "%s", (const char *)in);
 
-      if(strcmp(pss->path, "/") == 0) {
+      if(strcmp(pss->path, endpoints.index) == 0 || strcmp(pss->path, endpoints.parent) == 0) {
         snprintf(pss->path, sizeof(pss->path), "%s", "/index.html");
       }
       bool isStaticFile = server->static_folder && strstr(pss->path, ".") != NULL;
@@ -381,6 +419,9 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
       }
 
       if(isStaticFile) {
+        if(strlen(endpoints.parent)>0) {
+          removeFirst(pss->path, endpoints.parent);
+        }
         int len = strlen(server->static_folder) + strlen(pss->path) + 1;
         char stflpth[len];
         strncpy(stflpth, server->static_folder, strlen(server->static_folder));
